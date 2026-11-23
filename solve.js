@@ -377,9 +377,18 @@ function isContinued(line) {
   return j >= 2 && j < line.length && !/\s/.test(line[j]);
 }
 
-/** Whether `line` ends a paragraph: blank, a fence, a heading or a break. */
+/**
+ * Whether `line` ends a paragraph: blank, a fence, a heading or a
+ * break. Each of those opens on a distinct first character, so the
+ * first character picks the only test that can pass.
+ */
 function endsParagraph(line) {
-  return isBlank(line) || fenceLang(line) !== null || headingOf(line) !== null || isHr(line);
+  const c = line[0];
+  if (c === undefined || c === ' ' || c === '\t') return isBlank(line);
+  if (c === '`') return fenceLang(line) !== null;
+  if (c === '#') return headingOf(line) !== null;
+  if (c === '-' || c === '*') return isHr(line);
+  return false;
 }
 
 /** The characters a backslash escapes. */
@@ -430,7 +439,15 @@ function inlineRange(s, a, b, link) {
   const flush = (to) => {
     if (run < to) parts.push(escapeHtml(s.slice(run, to)));
   };
+  // Jump straight to the next character that can open a mark (a
+  // backslash, a backtick, a star or a bracket); everything between
+  // two marks is one plain run, escaped whole.
+  const special = /[\\`*[]/g;
   while (i < b) {
+    special.lastIndex = i;
+    const m = special.exec(s);
+    if (m === null || m.index >= b) break;
+    i = m.index;
     const c = s.charCodeAt(i);
     if (c === 92) {
       // backslash
@@ -442,7 +459,7 @@ function inlineRange(s, a, b, link) {
       } else i++;
       continue;
     }
-    if (c === 96) {
+    else if (c === 96) {
       // backtick
       const j = s.indexOf('`', i + 1);
       if (j !== -1 && j < b && j > i + 1) {
@@ -453,7 +470,7 @@ function inlineRange(s, a, b, link) {
       } else i++;
       continue;
     }
-    if (c === 42) {
+    else if (c === 42) {
       // star
       if (i + 1 < b && s[i + 1] === '*') {
         const j = findUnescaped(s, '**', i + 2, b);
@@ -474,24 +491,23 @@ function inlineRange(s, a, b, link) {
       }
       continue;
     }
-    if (c === 91) {
+    else {
       // open bracket
       const k = findUnescaped(s, ']', i + 1, b);
-      let m = -1;
+      let close = -1;
       if (k !== -1 && k + 1 < b && s[k + 1] === '(') {
         const p = s.indexOf(')', k + 2);
-        if (p !== -1 && p < b) m = p;
+        if (p !== -1 && p < b) close = p;
       }
-      const target = m === -1 ? '' : s.slice(k + 2, m);
+      const target = close === -1 ? '' : s.slice(k + 2, close);
       if (target !== '' && !/\s/.test(target)) {
         flush(i);
         parts.push('<a href="', escapeHtml(link(target)), '">', inlineRange(s, i + 1, k, link), '</a>');
-        i = m + 1;
+        i = close + 1;
         run = i;
       } else i++;
       continue;
     }
-    i++;
   }
   flush(b);
   return parts.join('');
@@ -517,7 +533,7 @@ function renderMarkdown(src, link, slugOf) {
       i++;
       continue;
     }
-    const lang = fenceLang(line);
+    const lang = line[0] === '`' ? fenceLang(line) : null;
     if (lang !== null) {
       const body = [];
       i++;
@@ -527,7 +543,7 @@ function renderMarkdown(src, link, slugOf) {
       blocks.push(lang === '' ? `<pre><code>${inner}</code></pre>` : `<pre><code class="language-${escapeHtml(lang)}">${inner}</code></pre>`);
       continue;
     }
-    const heading = headingOf(line);
+    const heading = line[0] === '#' ? headingOf(line) : null;
     if (heading !== null) {
       const id = uniqueSlug(slugOf(heading.text), ids);
       const html = inlineRange(heading.text, 0, heading.text.length, link);
@@ -536,7 +552,7 @@ function renderMarkdown(src, link, slugOf) {
       i++;
       continue;
     }
-    if (isHr(line)) {
+    if ((line[0] === '-' || line[0] === '*') && isHr(line)) {
       blocks.push('<hr>');
       i++;
       continue;
@@ -556,8 +572,8 @@ function renderMarkdown(src, link, slugOf) {
       }
       continue;
     }
-    const bullet = bulletText(line);
-    const ordered = bullet === null ? orderedText(line) : null;
+    const bullet = line[0] === '-' || line[0] === '*' ? bulletText(line) : null;
+    const ordered = bullet === null && line[0] >= '0' && line[0] <= '9' ? orderedText(line) : null;
     if (bullet !== null || ordered !== null) {
       const isOrdered = ordered !== null;
       const items = [];
@@ -1042,17 +1058,24 @@ export function run(input) {
   // What templates see.
   const linkOf = (s) =>
     s === null ? null : { title: s.data.title, url: s.url, date: s.data.date ?? '', date_long: s.data.date === undefined ? '' : longDate(s.data.date) };
-  const cardOf = (s) => ({
-    title: s.data.title,
-    url: s.url,
-    date: s.data.date ?? '',
-    date_long: s.data.date === undefined ? '' : longDate(s.data.date),
-    summary: s.data.summary ?? '',
-    excerpt: s.excerpt,
-    reading_minutes: Math.max(1, Math.ceil(s.words / 200)),
-    tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
-  });
-  const cards = new Map(posts.map((p) => [p, cardOf(p)]));
+  // A source's card is read by its own page, by the index and tag
+  // lists and by every page's "recent" list: build it once, on the
+  // source, and share it (rendering only ever reads it).
+  const cardOf = (s) => {
+    if (s.card === undefined) {
+      s.card = {
+        title: s.data.title,
+        url: s.url,
+        date: s.data.date ?? '',
+        date_long: s.data.date === undefined ? '' : longDate(s.data.date),
+        summary: s.data.summary ?? '',
+        excerpt: s.excerpt,
+        reading_minutes: Math.max(1, Math.ceil(s.words / 200)),
+        tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
+      };
+    }
+    return s.card;
+  };
   const pageOf = (s) => ({
     ...cardOf(s),
     slug: s.slug,
@@ -1071,10 +1094,14 @@ export function run(input) {
   const output = {};
   const site = { title: input.site.title, base_url: base };
   const allTags = tagList.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
-  const recent = posts.slice(0, input.site.recent).map((p) => cards.get(p));
+  const recent = posts.slice(0, input.site.recent).map((p) => cardOf(p));
+  // Every render shares one root scope (site, tags, recent); the
+  // per-render values sit in a child scope, where the lookup finds
+  // them first, exactly as it finds them in the merged scope.
+  const rootScope = { vars: { site, tags: allTags, recent }, parent: null };
   const render = (name, vars) => {
     const nodes = expanded.get(name);
-    return nodes === undefined ? null : renderNodes(nodes, { vars: { site, tags: allTags, recent, ...vars }, parent: null }, expanded, 0);
+    return nodes === undefined ? null : renderNodes(nodes, { vars, parent: rootScope }, expanded, 0);
   };
   for (const s of kept) output[`${s.outDir}/index.html`] = render(s.layout, { page: pageOf(s) });
   const per = input.site.per_page;
@@ -1082,13 +1109,13 @@ export function run(input) {
   const indexUrl = (k) => (k === 1 ? `${base}/` : `${base}/page/${k}/`);
   for (let k = 1; k <= pageCount; k++) {
     const html = render('index', {
-      posts: posts.slice((k - 1) * per, k * per).map((p) => cards.get(p)),
+      posts: posts.slice((k - 1) * per, k * per).map((p) => cardOf(p)),
       pager: { number: k, total: pageCount, url: indexUrl(k), newer_url: k === 1 ? '' : indexUrl(k - 1), older_url: k === pageCount ? '' : indexUrl(k + 1) },
     });
     if (html !== null) output[k === 1 ? 'index.html' : `page/${k}/index.html`] = html;
   }
   for (const t of tagList) {
-    const html = render('tag', { tag: { name: t.name, slug: t.slug, url: t.url, count: t.posts.length, posts: t.posts.map((p) => cards.get(p)) } });
+    const html = render('tag', { tag: { name: t.name, slug: t.slug, url: t.url, count: t.posts.length, posts: t.posts.map((p) => cardOf(p)) } });
     if (html !== null) output[`tags/${t.slug}/index.html`] = html;
   }
   const tagsHtml = render('tags', {});

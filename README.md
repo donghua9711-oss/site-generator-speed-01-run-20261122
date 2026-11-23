@@ -27,13 +27,16 @@ stage for stage, with identical semantics:
 - the Markdown reader classifies each line by its first
   characters instead of a battery of regular expressions, and
   its inline pass works on offsets into the original string
-  instead of slicing a fresh substring at every mark;
+  instead of slicing a fresh substring at every mark, jumping
+  straight from one mark to the next;
 - slugs are memoised per build, because a site repeats its tag
   names and headings across hundreds of sources;
 - templates are compiled once into node trees whose paths are
   pre-split, their includes spliced in place under the same
   depth rule the renderer uses, and rendering walks them with a
-  plain scope chain and one reused scope per loop.
+  plain scope chain, one reused scope per loop and one shared
+  root scope per build; a source's card is built once and
+  shared by every list that shows it.
 
 Verified locally against the kit's practice set (3 of 3 cases
 byte-identical) and against fresh sites drawn by the kit's own
